@@ -12,7 +12,7 @@ Este script en Node.js usa Playwright con el plugin **stealth**
 
 1. Clona el repositorio:
 
-   git clone https://github.com/TU_USUARIO/turo-scraper.git
+   git clone https://github.com/SamuelEpa/turo-scraper.git
    cd turo-scraper
 
 2. npm install
