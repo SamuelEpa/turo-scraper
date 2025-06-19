@@ -27,8 +27,14 @@ interface Quote {
   discountSavingsText: string | null;
 }
 
-(async () => {
+const dirPath = path.resolve(__dirname, '../vehiclesJSON');
+if (!fs.existsSync(dirPath)) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
 
+
+(async () => {
+  
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
