@@ -164,18 +164,14 @@ const firestore = new Firestore({
 
   const scrapedAt = new Date(); 
 
-  const batch = firestore.batch();
-  for (const v of result) {
-    const ref = firestore.collection('vehicles').doc();
+  const executionRef = firestore.collection('vehicles').doc();
 
-    batch.set(ref, {
-      ...v,
-      scrapedAt: scrapedAt,
-    });
-  }
-  await batch.commit();
+  await executionRef.set({
+    scrapedAt: scrapedAt,
+    executionData: result  
+  });
+
   console.log(`✅ Volcados ${result.length} vehículos a Firestore`);
-
 
   await browser.close();
 })();
