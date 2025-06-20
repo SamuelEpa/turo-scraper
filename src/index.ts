@@ -162,10 +162,16 @@ const firestore = new Firestore({
   // fs.writeFileSync(outPath, JSON.stringify(result, null, 2), 'utf-8');
   // console.log(`✅ Guardado ${result.length} vehículos en ${outPath}`);
 
+  const scrapedAt = new Date(); 
+
   const batch = firestore.batch();
   for (const v of result) {
-    const ref = firestore.collection('vehicles').doc(v.id.toString());
-    batch.set(ref, v, { merge: true });
+    const ref = firestore.collection('vehicles').doc();
+
+    batch.set(ref, {
+      ...v,
+      scrapedAt: scrapedAt,
+    });
   }
   await batch.commit();
   console.log(`✅ Volcados ${result.length} vehículos a Firestore`);
