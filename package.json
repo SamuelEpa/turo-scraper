@@ -10,6 +10,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@google-cloud/firestore": "^7.11.1",
     "@types/node": "^24.0.3",
     "playwright": "^1.53.1",
     "playwright-extra": "^4.3.6",
