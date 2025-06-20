@@ -1,0 +1,28 @@
+name: Scrape Turo → Firestore
+
+on:
+  schedule:
+    - cron:  '0 */3 * * *'    # cada 3 horas
+  workflow_dispatch:        # permite correr manualmente
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run scraper & push to Firestore
+      env:
+        FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        FIREBASE_PROJECT_ID:    ${{ secrets.FIREBASE_PROJECT_ID }}
+      run: npx ts-node src/index.ts

@@ -3,6 +3,8 @@ import stealth from 'puppeteer-extra-plugin-stealth';
 import fs from 'fs';
 import path from 'path';
 import type { Request as PWRequest } from 'playwright';
+import { Firestore } from '@google-cloud/firestore';
+
 
 chromium.use(stealth());
 
@@ -32,6 +34,15 @@ if (!fs.existsSync(dirPath)) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
 
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
+const firestore = new Firestore({
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  credentials: {
+    client_email: serviceAccount.client_email,
+    private_key: serviceAccount.private_key.replace(/\\n/g, '\n')
+  }
+});
+
 (async () => {
 
   const browser = await chromium.launch({
@@ -60,9 +71,7 @@ if (!fs.existsSync(dirPath)) {
   await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
   const searchReq = await searchRequestPromise;
-
   const searchPayload = JSON.parse(searchReq.postData()!);
-
   const nestedFilters = searchPayload.filters;
   const startDateTime = nestedFilters.dates.start;
   const endDateTime = nestedFilters.dates.end;
@@ -149,9 +158,18 @@ if (!fs.existsSync(dirPath)) {
     };
   });
 
-  const outPath = path.resolve(__dirname, `../vehiclesJSON/vehicles-${Date.now()}.json`);
-  fs.writeFileSync(outPath, JSON.stringify(result, null, 2), 'utf-8');
-  console.log(`✅ Guardado ${result.length} vehículos en ${outPath}`);
+  // const outPath = path.resolve(__dirname, `../vehiclesJSON/vehicles-${Date.now()}.json`);
+  // fs.writeFileSync(outPath, JSON.stringify(result, null, 2), 'utf-8');
+  // console.log(`✅ Guardado ${result.length} vehículos en ${outPath}`);
+
+  const batch = firestore.batch();
+  for (const v of result) {
+    const ref = firestore.collection('vehicles').doc(v.id.toString());
+    batch.set(ref, v, { merge: true });
+  }
+  await batch.commit();
+  console.log(`✅ Volcados ${result.length} vehículos a Firestore`);
+
 
   await browser.close();
 })();
