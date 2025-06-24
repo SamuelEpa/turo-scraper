@@ -155,6 +155,7 @@ const firestore = new Firestore({
         ? Math.round(q.totalTripPrice.amount)
         : null,
       image: v.images[0]?.originalImageUrl ?? null,
+      position: vehicles.findIndex(x => x.id === v.id) + 1
     };
   });
 
