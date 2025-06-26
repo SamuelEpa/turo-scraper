@@ -64,6 +64,9 @@ async function scrapeSearchUrl(
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
+  await page.mouse.wheel(0, 500);
+  await page.waitForTimeout(1000 + Math.random() * 2000);
+
   const searchReq = await searchRequestPromise;
   const searchPayload = JSON.parse(searchReq.postData()!);
   const { filters: nestedFilters } = searchPayload;
