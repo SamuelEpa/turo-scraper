@@ -53,7 +53,11 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-async function scrapeSearchUrl(page: Page, url: string) {
+async function scrapeSearchUrl(
+  page: Page,
+  url: string,
+  attempt = 1
+): Promise<any[]> {
   const searchRequestPromise = page.waitForRequest(req =>
     req.url().includes('/api/v2/search') && req.method() === 'POST'
   );
@@ -70,38 +74,41 @@ async function scrapeSearchUrl(page: Page, url: string) {
     res => res.url().includes('/api/v2/search') && res.status() === 200,
     { timeout: 60000 }
   );
-  const searchJson = await filteredRes.json() as any;
-  const vehicles = (searchJson.vehicles ?? []) as Vehicle[];
-  let region = searchJson.searchLocation?.region as string | undefined;
+  const raw = await filteredRes.text();
+  console.log(`🔍 [URL${attempt}] Raw response length for ${url}:`, raw.length);
 
+  const searchJson = JSON.parse(raw) as any;
+  const vehicles = (searchJson.vehicles ?? []) as Vehicle[];
+  console.log(`🔍 [URL${attempt}] Parsed vehicles.length =`, vehicles.length);
+
+
+  let region =
+    searchJson.searchLocation?.region ||
+    (searchPayload.searchRegion ?? searchPayload.region) ||
+    new URL(url).searchParams.get('region') ||
+    '';
   if (!region) {
-    console.warn('⚠️  Falta searchLocation.region; extrayendo de la URL');
-    const urlObj = new URL(url);
-    region = urlObj.searchParams.get('region') ?? '';
+    console.warn(`⚠️  No pude determinar region, usando cadena vacía para ${url}`);
+  }
+
+  if (vehicles.length === 0 && attempt < 3) {
+    console.warn(`⚠️  vehicles.length=0, reintentando (intento ${attempt + 1})`);
+    await page.waitForTimeout(3000 + Math.random() * 2000);
+    return scrapeSearchUrl(page, url, attempt + 1);
   }
 
 
   const allQuotes: Record<string, Quote> = {};
-
   const vehicleChunks = chunkArray(vehicles, 20);
   for (const chunk of vehicleChunks) {
-    const apiEstimatedQuoteLocationDtoMap = chunk.reduce((acc:any, v:any) => {
-      acc[v.id.toString()] = {
+    const apiMap = chunk.reduce((acc: any, v: any) => {
+      acc[v.id] = {
         isDelivery: v.location.isDelivery,
         locationId: v.location.locationId,
       };
       return acc;
-    }, {} as Record<string, { isDelivery: boolean; locationId: number | null }>);
-
-    const payload = {
-      age,
-      apiEstimatedQuoteLocationDtoMap,
-      startDateTime,
-      endDateTime,
-      region,
-      searchRegion: region,
-    };
-
+    }, {});
+    const payload = { age, apiEstimatedQuoteLocationDtoMap: apiMap, startDateTime, endDateTime, region, searchRegion: region };
     const quoteJson = await page.evaluate(async body => {
       const resp = await fetch('/api/bulk-quotes/v2', {
         method: 'POST',
@@ -110,17 +117,11 @@ async function scrapeSearchUrl(page: Page, url: string) {
       });
       return resp.json();
     }, payload) as { estimatedQuotes: Record<string, Quote> };
-
     Object.assign(allQuotes, quoteJson.estimatedQuotes);
   }
 
-  const days = Math.round(
-    (new Date(endDateTime).getTime() - new Date(startDateTime).getTime())
-    / (1000 * 60 * 60 * 24)
-  );
-
   return vehicles.map(v => {
-    const q = allQuotes[v.id.toString()];
+    const q = allQuotes[v.id];
     return {
       id: v.id,
       title: `${v.year} ${v.make} ${v.model}`,
@@ -180,34 +181,27 @@ async function scrapeSearchUrl(page: Page, url: string) {
     try {
       const result = await scrapeSearchUrl(page, urls[i]);
 
-      // const outPath = path.resolve(__dirname, `../vehiclesJSON/vehicles-${i + 1}-${Date.now()}.json`);
-      // fs.writeFileSync(outPath, JSON.stringify(result, null, 2), 'utf-8');
-      // console.log(`✅ URL ${i + 1}: guardado ${result.length} vehículos en ${outPath}`);
+      if (result.length === 0) {
+        console.log(`ℹ️  URL ${i + 1} devolvió 0 vehículos; omitiendo escritura`);
+      } else {
+        const colName = `vehicles-url-${i + 1}`;
+        await firestore.collection(colName).doc().set({
+          scrapedAt: new Date(),
+          executionData: result
+        });
+        console.log(`✅ Volcados ${result.length} vehículos a Firestore (${colName})`);
 
+        // const outPath = path.resolve(__dirname, `../vehiclesJSON/vehicles-${i + 1}-${Date.now()}.json`);
+        // fs.writeFileSync(outPath, JSON.stringify(result, null, 2), 'utf-8');
+        // console.log(`✅ URL ${i + 1}: guardado ${result.length} vehículos en ${outPath}`);
 
-      const colName = `vehicles-url-${i + 1}`;
-      const executionRef = firestore.collection(colName).doc();
-
-      await executionRef.set({
-        scrapedAt: new Date(),
-        executionData: result  
-      });
-
-      console.log(`✅ Volcados ${result.length} vehículos a Firestore (${colName})`);
-
-      await page.mouse.move(100, 100);
-      await page.waitForTimeout(500 + Math.random() * 500);
-      await page.mouse.move(200, 200);
-
+      }
     } catch (err) {
-
       console.error(`❌ Error scraping URL ${i + 1}:`, err);
     } finally {
-
       const delay = 2000 + Math.random() * 2000;
-      console.log(`⏱ Esperando ${Math.round(delay)} ms antes de la siguiente URL…`);
+      console.log(`⏱ Esperando ${Math.round(delay)} ms…`);
       await page.waitForTimeout(delay);
-
       await page.close();
       await context.close();
     }
