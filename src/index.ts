@@ -72,7 +72,13 @@ async function scrapeSearchUrl(page: Page, url: string) {
   );
   const searchJson = await filteredRes.json() as any;
   const vehicles = (searchJson.vehicles ?? []) as Vehicle[];
-  const region = searchJson.searchLocation.region as string;
+  let region = searchJson.searchLocation?.region as string | undefined;
+
+  if (!region) {
+    console.warn('⚠️  Falta searchLocation.region; extrayendo de la URL');
+    const urlObj = new URL(url);
+    region = urlObj.searchParams.get('region') ?? '';
+  }
 
 
   const allQuotes: Record<string, Quote> = {};
