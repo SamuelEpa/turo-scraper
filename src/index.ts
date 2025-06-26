@@ -62,21 +62,24 @@ async function scrapeSearchUrl(
     req.url().includes('/api/v2/search') && req.method() === 'POST'
   );
 
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  const searchResponsePromise = page.waitForResponse(
+    res => res.url().includes('/api/v2/search') && res.status() === 200,
+    { timeout: 60000 }
+  );
+
+  await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
 
   await page.mouse.wheel(0, 500);
   await page.waitForTimeout(1000 + Math.random() * 2000);
 
   const searchReq = await searchRequestPromise;
+  const filteredRes = await searchResponsePromise;
+
   const searchPayload = JSON.parse(searchReq.postData()!);
   const { filters: nestedFilters } = searchPayload;
   const { start: startDateTime, end: endDateTime } = nestedFilters.dates;
   const age = nestedFilters.age;
 
-  const filteredRes = await page.waitForResponse(
-    res => res.url().includes('/api/v2/search') && res.status() === 200,
-    { timeout: 60000 }
-  );
   const raw = await filteredRes.text();
   console.log(`🔍 [URL${attempt}] Raw response length for ${url}:`, raw.length);
 
