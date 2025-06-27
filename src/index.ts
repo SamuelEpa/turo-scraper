@@ -53,6 +53,39 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
+
+function pad2(n: number) { return n.toString().padStart(2, '0') }
+
+function formatDate(d: Date) {
+  return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}/${d.getFullYear()}`;
+}
+
+function formatTime(d: Date) {
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+function addHours(d: Date, h: number) {
+  const x = new Date(d);
+  x.setHours(x.getHours() + h);
+  return x;
+}
+
+
+const now = new Date();
+// 1) redondeo a próxima hora
+const nextHour = new Date(now);
+if (nextHour.getMinutes() > 0 || nextHour.getSeconds() > 0) {
+  nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
+}
+// 2) compensamos el “lead time” sumando 1 hora
+const start1 = addHours(nextHour, 1);
+// 3) para la URL 2 partimos de start1 + 24 h
+const start2 = addHours(start1, 24);
+// 4) fin siempre = start + 72 h
+const end1 = addHours(start1, 72);
+const end2 = addHours(start2, 72);
+
+
 async function scrapeSearchUrl(
   page: Page,
   url: string,
@@ -165,9 +198,42 @@ async function scrapeSearchUrl(
   });
 
   const urls = [
-    'https://turo.com/us/en/search?age=25&country=US&defaultZoomLevel=13&endDate=06%2F28%2F2025&endTime=09%3A00&fuelTypes=ELECTRIC&isMapSearch=false&itemsPerPage=200&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL&sortType=RELEVANCE&startDate=06%2F25%2F2025&startTime=10%3A00&useDefaultMaximumDistance=true',// URL 1
-    'https://turo.com/us/en/search?age=25&country=US&defaultZoomLevel=11&endDate=06%2F29%2F2025&endTime=10%3A00&fromYear=2024&fuelTypes=ELECTRIC&isMapSearch=false&itemsPerPage=200&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport&locationType=AIRPORT&longitude=-80.28705&makes=Tesla&pickupType=ALL&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL&sortType=RELEVANCE&startDate=06%2F26%2F2025&startTime=10%3A00&toYear=2026&useDefaultMaximumDistance=true', // URL 2
-    'https://turo.com/us/en/search?age=25&country=US&defaultZoomLevel=13&endDate=06%2F28%2F2025&endTime=09%3A00&isMapSearch=false&itemsPerPage=200&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL&sortType=RELEVANCE&startDate=06%2F25%2F2025&startTime=10%3A00&useDefaultMaximumDistance=true', // URL 3
+    `https://turo.com/us/en/search?` +
+    `age=25&country=US&defaultZoomLevel=13` +
+    `&startDate=${encodeURIComponent(formatDate(start1))}` +
+    `&startTime=${encodeURIComponent(formatTime(start1))}` +
+    `&endDate=${encodeURIComponent(formatDate(end1))}` +
+    `&endTime=${encodeURIComponent(formatTime(end1))}` +
+    `&fuelTypes=ELECTRIC&isMapSearch=false&itemsPerPage=200` +
+    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
+    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
+    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
+    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`,// URL 1
+
+    `https://turo.com/us/en/search?` +
+    `age=25&country=US&defaultZoomLevel=11` +
+    `&startDate=${encodeURIComponent(formatDate(start2))}` +
+    `&startTime=${encodeURIComponent(formatTime(start2))}` +
+    `&endDate=${encodeURIComponent(formatDate(end2))}` +
+    `&endTime=${encodeURIComponent(formatTime(end2))}` +
+    `&fuelTypes=ELECTRIC&fromYear=2024&toYear=2026&makes=Tesla` +
+    `&isMapSearch=false&itemsPerPage=200` +
+    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
+    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
+    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
+    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`, // URL 2
+
+    `https://turo.com/us/en/search?` +
+    `age=25&country=US&defaultZoomLevel=13` +
+    `&startDate=${encodeURIComponent(formatDate(start1))}` +
+    `&startTime=${encodeURIComponent(formatTime(start1))}` +
+    `&endDate=${encodeURIComponent(formatDate(end1))}` +
+    `&endTime=${encodeURIComponent(formatTime(end1))}` +
+    `&isMapSearch=false&itemsPerPage=200` +
+    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
+    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
+    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
+    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`, // URL 3
   ];
 
   for (let i = 0; i < urls.length; i++) {
