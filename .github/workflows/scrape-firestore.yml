@@ -26,6 +26,7 @@ jobs:
 
     - name: Run scraper & push to Firestore
       env:
+        TZ: America/New_York
         FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         FIREBASE_PROJECT_ID:    ${{ secrets.FIREBASE_PROJECT_ID }}
       run: npx ts-node src/index.ts
