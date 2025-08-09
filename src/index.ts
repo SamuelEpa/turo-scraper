@@ -70,23 +70,58 @@ function addHours(d: Date, h: number) {
   return x;
 }
 
+const SLOT_OFFSETS: Record<number, number> = {
+  1: 1,   // Option 1 => nextHour + 1h
+  2: 25,  // Option 2 => nextHour + 25h (start1 + 24h)
+  3: 3,   // Option 3 => nextHour + 3h (start1 + 2h)
+};
+const SLOT_DURATION_HOURS = 72; // duración estándar (end = start + 72h)
 
-const now = new Date();
-// 1) redondeo a próxima hora
-const nextHour = new Date(now);
-if (nextHour.getMinutes() > 0 || nextHour.getSeconds() > 0) {
-  nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
+function cleanUrlRemoveDateParams(rawUrl: string) {
+  try {
+    const u = new URL(rawUrl);
+    // quitar parámetros que pueden venir pegados
+    ['startDate', 'startTime', 'endDate', 'endTime', 'monthlyStartDate', 'monthlyEndDate'].forEach(p => u.searchParams.delete(p));
+    // también limpia parámetros vacíos como startTime=
+    for (const [k, v] of Array.from(u.searchParams.entries())) {
+      if (v === '') u.searchParams.delete(k);
+    }
+    return u.toString();
+  } catch (e) {
+    console.warn('URL inválida en cleanUrlRemoveDateParams:', rawUrl);
+    return rawUrl;
+  }
 }
-// 2) compensamos el “lead time” sumando 1 hora
-const start1 = addHours(nextHour, 1);
-// 3) para la URL 2 partimos de start1 + 24 h
-const start2 = addHours(start1, 24);
-// 4) para la URL 4 partimos de start1 + 2 h
-const start3 = addHours(start1, 2);
-// 5) fin siempre = start + 72 h
-const end1 = addHours(start1, 72);
-const end2 = addHours(start2, 72);
-const end3 = addHours(start3, 72);
+
+function addDateParamsToUrl(baseUrl: string, start: Date, end: Date) {
+  try {
+    const u = new URL(baseUrl);
+    u.searchParams.set('startDate', formatDate(start));
+    u.searchParams.set('startTime', formatTime(start));
+    u.searchParams.set('endDate', formatDate(end));
+    u.searchParams.set('endTime', formatTime(end));
+    return u.toString();
+  } catch (e) {
+    console.warn('Error construyendo fecha para URL base:', baseUrl, e);
+    return baseUrl;
+  }
+}
+
+
+async function getActiveTemplates() {
+  const snap = await firestore.collection('scrape-templates').where('active', '==', true).get();
+  const templates: { id: string; label?: string; url: string; slot?: number }[] = [];
+  snap.forEach(d => {
+    const data = d.data() as any;
+    templates.push({
+      id: d.id,
+      label: data.label,
+      url: data.url,
+      slot: data.slot ?? 1
+    });
+  });
+  return templates;
+}
 
 
 async function scrapeSearchUrl(
@@ -191,7 +226,7 @@ async function scrapeSearchUrl(
   ];
 
   function pickRandom<T>(arr: T[]): T {
-    return arr[Math.floor(Math.random() * arr.length)];
+    return arr[Math.floor(Math.random() * Math.random() * arr.length) % arr.length];
   }
 
   const browser = await chromium.launch({
@@ -199,58 +234,35 @@ async function scrapeSearchUrl(
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
 
-  const urls = [
-    `https://turo.com/us/en/search?` +
-    `age=25&country=US&defaultZoomLevel=13` +
-    `&startDate=${encodeURIComponent(formatDate(start1))}` +
-    `&startTime=${encodeURIComponent(formatTime(start1))}` +
-    `&endDate=${encodeURIComponent(formatDate(end1))}` +
-    `&endTime=${encodeURIComponent(formatTime(end1))}` +
-    `&fuelTypes=ELECTRIC&isMapSearch=false&itemsPerPage=200` +
-    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
-    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
-    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
-    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`,// URL 1
 
-    `https://turo.com/us/en/search?` +
-    `age=25&country=US&defaultZoomLevel=11` +
-    `&startDate=${encodeURIComponent(formatDate(start2))}` +
-    `&startTime=${encodeURIComponent(formatTime(start2))}` +
-    `&endDate=${encodeURIComponent(formatDate(end2))}` +
-    `&endTime=${encodeURIComponent(formatTime(end2))}` +
-    `&fuelTypes=ELECTRIC&fromYear=2024&toYear=2026&makes=Tesla` +
-    `&isMapSearch=false&itemsPerPage=200` +
-    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
-    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
-    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
-    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`, // URL 2
+  const now = new Date();
+  const nextHour = new Date(now);
+  if (nextHour.getMinutes() > 0 || nextHour.getSeconds() > 0) {
+    nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
+  }
 
-    `https://turo.com/us/en/search?` +
-    `age=25&country=US&defaultZoomLevel=13` +
-    `&startDate=${encodeURIComponent(formatDate(start1))}` +
-    `&startTime=${encodeURIComponent(formatTime(start1))}` +
-    `&endDate=${encodeURIComponent(formatDate(end1))}` +
-    `&endTime=${encodeURIComponent(formatTime(end1))}` +
-    `&isMapSearch=false&itemsPerPage=200` +
-    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
-    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
-    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
-    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`, // URL 3
+  const templates = await getActiveTemplates();
+  if (templates.length === 0) {
+    console.log('No hay plantillas activas en firestore. Saliendo sin scrapear.');
+    await browser.close();
+    process.exit(0);
+  }
 
-    `https://turo.com/us/en/search?` +
-    `age=25&country=US&defaultZoomLevel=13` +
-    `&startDate=${encodeURIComponent(formatDate(start3))}` +
-    `&startTime=${encodeURIComponent(formatTime(start3))}` +
-    `&endDate=${encodeURIComponent(formatDate(end3))}` +
-    `&endTime=${encodeURIComponent(formatTime(end3))}` +
-    `&fuelTypes=ELECTRIC&isMapSearch=false&itemsPerPage=200` +
-    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
-    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
-    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
-    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`,// URL 4
-  ];
+  const templateUrls: { slot: number; docId: string; url: string; label?: string }[] = [];
 
-  for (let i = 0; i < urls.length; i++) {
+  for (const t of templates) {
+    const base = cleanUrlRemoveDateParams(t.url);
+    const offset = SLOT_OFFSETS[t.slot ?? 1] ?? 1;
+    const start = addHours(nextHour, offset);
+    const end = addHours(start, SLOT_DURATION_HOURS);
+    const finalUrl = addDateParamsToUrl(base, start, end);
+    templateUrls.push({ slot: t.slot ?? 1, docId: t.id, url: finalUrl, label: t.label });
+  }
+
+  // Iterar por cada template en lugar de por 4 urls hardcodeadas
+  for (let i = 0; i < templateUrls.length; i++) {
+
+    const templateItem = templateUrls[i];
 
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
@@ -260,15 +272,20 @@ async function scrapeSearchUrl(
     const page = await context.newPage();
 
     try {
-      const result = await scrapeSearchUrl(page, urls[i]);
+      console.log(`➡️ Scraping template ${templateItem.docId} (${templateItem.label || 'no-label'}) -> ${templateItem.url}`);
+      const result = await scrapeSearchUrl(page, templateItem.url);
 
       if (result.length === 0) {
-        console.log(`ℹ️  URL ${i + 1} devolvió 0 vehículos; omitiendo escritura`);
+        console.log(`ℹ️  Template ${templateItem.docId} devolvió 0 vehículos; omitiendo escritura`);
       } else {
-        const colName = `vehicles-url-${i + 1}`;
+
+        const colName = `vehicles-template-${templateItem.docId}`;
         await firestore.collection(colName).doc().set({
           scrapedAt: new Date(),
-          executionData: result
+          executionData: result,
+          templateId: templateItem.docId,
+          slot: templateItem.slot,
+          templateLabel: templateItem.label ?? null
         });
         console.log(`✅ Volcados ${result.length} vehículos a Firestore (${colName})`);
 
@@ -277,7 +294,7 @@ async function scrapeSearchUrl(
         // console.log(`✅ URL ${i + 1}: guardado ${result.length} vehículos en ${outPath}`);
       }
     } catch (err) {
-      console.error(`❌ Error scraping URL ${i + 1}:`, err);
+      console.error(`❌ Error scraping template ${templateItem.docId}:`, err);
     } finally {
       const delay = 2000 + Math.random() * 2000;
       console.log(`⏱ Esperando ${Math.round(delay)} ms…`);
