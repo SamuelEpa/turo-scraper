@@ -4,7 +4,6 @@ import { chromium } from 'playwright-extra';
 import stealth from 'puppeteer-extra-plugin-stealth';
 import fs from 'fs';
 import path from 'path';
-import type { Request as PWRequest } from 'playwright';
 import { Firestore } from '@google-cloud/firestore';
 
 chromium.use(stealth());
@@ -32,9 +31,7 @@ interface Quote {
 }
 
 const dirPath = path.resolve(__dirname, '../vehiclesJSON');
-if (!fs.existsSync(dirPath)) {
-  fs.mkdirSync(dirPath, { recursive: true });
-}
+if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
 const firestore = new Firestore({
@@ -47,70 +44,83 @@ const firestore = new Firestore({
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
+  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
   return chunks;
 }
+function pad2(n: number) { return n.toString().padStart(2, '0'); }
+function formatDate(d: Date) { return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}/${d.getFullYear()}`; }
+function formatTime(d: Date) { return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+function addHours(d: Date, h: number) { const x = new Date(d); x.setHours(x.getHours() + h); return x; }
 
 
-function pad2(n: number) { return n.toString().padStart(2, '0') }
+const SLOT_OFFSETS: Record<number, number> = {};
+const SLOT_DURATION_HOURS = 72;
 
-function formatDate(d: Date) {
-  return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}/${d.getFullYear()}`;
+
+function parseSlotsField(val: any): string[] | number[] | undefined {
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string') {
+    const arr = val.split(',').map(s => s.trim()).filter(s => s !== '');
+    const areNumbers = arr.every(a => /^[0-9]+$/.test(a));
+    if (areNumbers) return arr.map(a => parseInt(a, 10));
+    return arr; 
+  }
+  if (typeof val === 'number' && Number.isInteger(val)) return [val];
+  return undefined;
 }
 
-function formatTime(d: Date) {
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+
+async function getActiveSlotsById() {
+  const snap = await firestore.collection('scrape-slots').get();
+  const map = new Map<string, { label?: string; offsetHours?: number; durationHours?: number }>();
+  snap.forEach(d => {
+    const data = d.data() as any;
+    map.set(d.id, {
+      label: data.label,
+      offsetHours: typeof data.offsetHours === 'number' ? data.offsetHours : 0,
+      durationHours: typeof data.durationHours === 'number' ? data.durationHours : SLOT_DURATION_HOURS
+    });
+  });
+  return map;
 }
 
-function addHours(d: Date, h: number) {
-  const x = new Date(d);
-  x.setHours(x.getHours() + h);
-  return x;
+
+function cleanUrlRemoveDateParams(rawUrl: string) {
+  try {
+    const u = new URL(rawUrl);
+    ['startDate', 'startTime', 'endDate', 'endTime', 'monthlyStartDate', 'monthlyEndDate'].forEach(p => u.searchParams.delete(p));
+    for (const [k, v] of Array.from(u.searchParams.entries())) if (v === '') u.searchParams.delete(k);
+    return u.toString();
+  } catch (e) {
+    console.warn('URL inválida en cleanUrlRemoveDateParams:', rawUrl);
+    return rawUrl;
+  }
+}
+function addDateParamsToUrl(baseUrl: string, start: Date, end: Date) {
+  try {
+    const u = new URL(baseUrl);
+    u.searchParams.set('startDate', formatDate(start));
+    u.searchParams.set('startTime', formatTime(start));
+    u.searchParams.set('endDate', formatDate(end));
+    u.searchParams.set('endTime', formatTime(end));
+    return u.toString();
+  } catch (e) {
+    console.warn('Error construyendo fecha para URL base:', baseUrl, e);
+    return baseUrl;
+  }
 }
 
 
-const now = new Date();
-// 1) redondeo a próxima hora
-const nextHour = new Date(now);
-if (nextHour.getMinutes() > 0 || nextHour.getSeconds() > 0) {
-  nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
-}
-// 2) compensamos el “lead time” sumando 1 hora
-const start1 = addHours(nextHour, 1);
-// 3) para la URL 2 partimos de start1 + 24 h
-const start2 = addHours(start1, 24);
-// 4) para la URL 4 partimos de start1 + 2 h
-const start3 = addHours(start1, 2);
-// 5) fin siempre = start + 72 h
-const end1 = addHours(start1, 72);
-const end2 = addHours(start2, 72);
-const end3 = addHours(start3, 72);
-
-
-async function scrapeSearchUrl(
-  page: Page,
-  url: string,
-  attempt = 1
-): Promise<any[]> {
-  const searchRequestPromise = page.waitForRequest(req =>
-    req.url().includes('/api/v2/search') && req.method() === 'POST'
-  );
-
+async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<any[]> {
+  const searchRequestPromise = page.waitForRequest(req => req.url().includes('/api/v2/search') && req.method() === 'POST');
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   const searchReq = await searchRequestPromise;
   const searchPayload = JSON.parse(searchReq.postData()!);
-
   const { filters: nestedFilters } = searchPayload;
   const { start: startDateTime, end: endDateTime } = nestedFilters.dates;
   const age = nestedFilters.age;
 
-  const filteredRes = await page.waitForResponse(
-    res => res.url().includes('/api/v2/search') && res.status() === 200,
-    { timeout: 60000 }
-  );
-
+  const filteredRes = await page.waitForResponse(res => res.url().includes('/api/v2/search') && res.status() === 200, { timeout: 60000 });
   const raw = await filteredRes.text();
   console.log(`🔍 [URL${attempt}] Raw response length for ${url}:`, raw.length);
 
@@ -118,15 +128,12 @@ async function scrapeSearchUrl(
   const vehicles = (searchJson.vehicles ?? []) as Vehicle[];
   console.log(`🔍 [URL${attempt}] Parsed vehicles.length =`, vehicles.length);
 
-
   let region =
     searchJson.searchLocation?.region ||
     (searchPayload.searchRegion ?? searchPayload.region) ||
     new URL(url).searchParams.get('region') ||
     '';
-  if (!region) {
-    console.warn(`⚠️  No pude determinar region, usando cadena vacía para ${url}`);
-  }
+  if (!region) console.warn(`⚠️  No pude determinar region, usando cadena vacía para ${url}`);
 
   if (vehicles.length === 0 && attempt < 3) {
     console.warn(`⚠️  vehicles.length=0, reintentando (intento ${attempt + 1})`);
@@ -134,15 +141,11 @@ async function scrapeSearchUrl(
     return scrapeSearchUrl(page, url, attempt + 1);
   }
 
-
   const allQuotes: Record<string, Quote> = {};
   const vehicleChunks = chunkArray(vehicles, 20);
   for (const chunk of vehicleChunks) {
     const apiMap = chunk.reduce((acc: any, v: any) => {
-      acc[v.id] = {
-        isDelivery: v.location.isDelivery,
-        locationId: v.location.locationId,
-      };
+      acc[v.id] = { isDelivery: v.location.isDelivery, locationId: v.location.locationId };
       return acc;
     }, {});
     const payload = { age, apiEstimatedQuoteLocationDtoMap: apiMap, startDateTime, endDateTime, region, searchRegion: region };
@@ -150,7 +153,7 @@ async function scrapeSearchUrl(
       const resp = await fetch('/api/bulk-quotes/v2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(body)
       });
       return resp.json();
     }, payload) as { estimatedQuotes: Record<string, Quote> };
@@ -163,14 +166,11 @@ async function scrapeSearchUrl(
       id: v.id,
       title: `${v.year} ${v.make} ${v.model}`,
       image: v.images[0]?.originalImageUrl ?? null,
-      totalQuoted: q?.totalTripPrice.amount != null
-        ? Math.round(q.totalTripPrice.amount)
-        : null,
+      totalQuoted: q?.totalTripPrice.amount != null ? Math.round(q.totalTripPrice.amount) : null,
       position: vehicles.findIndex(x => x.id === v.id) + 1,
     };
   });
 }
-
 
 (async () => {
   const USER_AGENTS = [
@@ -191,7 +191,7 @@ async function scrapeSearchUrl(
   ];
 
   function pickRandom<T>(arr: T[]): T {
-    return arr[Math.floor(Math.random() * arr.length)];
+    return arr[Math.floor(Math.random() * Math.random() * arr.length) % arr.length];
   }
 
   const browser = await chromium.launch({
@@ -199,85 +199,125 @@ async function scrapeSearchUrl(
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
 
-  const urls = [
-    `https://turo.com/us/en/search?` +
-    `age=25&country=US&defaultZoomLevel=13` +
-    `&startDate=${encodeURIComponent(formatDate(start1))}` +
-    `&startTime=${encodeURIComponent(formatTime(start1))}` +
-    `&endDate=${encodeURIComponent(formatDate(end1))}` +
-    `&endTime=${encodeURIComponent(formatTime(end1))}` +
-    `&fuelTypes=ELECTRIC&isMapSearch=false&itemsPerPage=200` +
-    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
-    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
-    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
-    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`,// URL 1
 
-    `https://turo.com/us/en/search?` +
-    `age=25&country=US&defaultZoomLevel=11` +
-    `&startDate=${encodeURIComponent(formatDate(start2))}` +
-    `&startTime=${encodeURIComponent(formatTime(start2))}` +
-    `&endDate=${encodeURIComponent(formatDate(end2))}` +
-    `&endTime=${encodeURIComponent(formatTime(end2))}` +
-    `&fuelTypes=ELECTRIC&fromYear=2024&toYear=2026&makes=Tesla` +
-    `&isMapSearch=false&itemsPerPage=200` +
-    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
-    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
-    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
-    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`, // URL 2
+  const now = new Date();
+  const nextHour = new Date(now);
+  if (nextHour.getMinutes() > 0 || nextHour.getSeconds() > 0) nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
 
-    `https://turo.com/us/en/search?` +
-    `age=25&country=US&defaultZoomLevel=13` +
-    `&startDate=${encodeURIComponent(formatDate(start1))}` +
-    `&startTime=${encodeURIComponent(formatTime(start1))}` +
-    `&endDate=${encodeURIComponent(formatDate(end1))}` +
-    `&endTime=${encodeURIComponent(formatTime(end1))}` +
-    `&isMapSearch=false&itemsPerPage=200` +
-    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
-    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
-    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
-    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`, // URL 3
+  const templates = await (async () => {
+    const snap = await firestore.collection('scrape-templates').where('active', '==', true).get();
+    const arr: any[] = [];
+    snap.forEach(d => {
+      const data = d.data() as any;
+      arr.push({
+        id: d.id,
+        label: data.label,
+        url: data.url,
+        slotId: data.slotId ?? null,                
+        slotsIds: parseSlotsField(data.slots) ?? undefined, 
+        slot: data.slot ?? undefined,
+        offsetHours: typeof data.offsetHours === 'number' ? data.offsetHours : undefined,
+        durationHours: typeof data.durationHours === 'number' ? data.durationHours : undefined
+      });
+    });
+    return arr;
+  })();
 
-    `https://turo.com/us/en/search?` +
-    `age=25&country=US&defaultZoomLevel=13` +
-    `&startDate=${encodeURIComponent(formatDate(start3))}` +
-    `&startTime=${encodeURIComponent(formatTime(start3))}` +
-    `&endDate=${encodeURIComponent(formatDate(end3))}` +
-    `&endTime=${encodeURIComponent(formatTime(end3))}` +
-    `&fuelTypes=ELECTRIC&isMapSearch=false&itemsPerPage=200` +
-    `&latitude=25.79587&location=MIA%20-%20Miami%20International%20Airport` +
-    `&locationType=AIRPORT&longitude=-80.28705&pickupType=ALL` +
-    `&placeId=ChIJwUq5Tk232YgR4fiiy-Dan5g&region=FL` +
-    `&sortType=RELEVANCE&useDefaultMaximumDistance=true`,// URL 4
-  ];
+  if (templates.length === 0) {
+    console.log('No hay plantillas activas en firestore. Saliendo sin scrapear.');
+    await browser.close();
+    process.exit(0);
+  }
 
-  for (let i = 0; i < urls.length; i++) {
+  const slotOptionsMap = await getActiveSlotsById();
 
+  const templateUrls: { slotId?: string | null; slotLegacy?: number | null; docId: string; url: string; label?: string; offset?: number; duration?: number }[] = [];
+
+
+  for (const t of templates) {
+    const base = cleanUrlRemoveDateParams(t.url);
+    let slotsToCreateIds: string[] = [];
+    let legacySlotNumbers: number[] = [];
+
+    if (Array.isArray(t.slotsIds) && t.slotsIds.length > 0) {
+      const strings = t.slotsIds.filter((x: any) => typeof x === 'string');
+      const nums = t.slotsIds.filter((x: any) => typeof x === 'number');
+      if (strings.length) slotsToCreateIds = strings;
+      else if (nums.length) legacySlotNumbers = nums;
+    }
+
+    if (!slotsToCreateIds.length && t.slotId) {
+      slotsToCreateIds = [t.slotId];
+    }
+
+    if (!slotsToCreateIds.length && !legacySlotNumbers.length) {
+      if (typeof t.slot === 'number') legacySlotNumbers = [t.slot];
+      else legacySlotNumbers = [1]; 
+    }
+
+    if (slotsToCreateIds.length) {
+      for (const slotId of slotsToCreateIds) {
+        const slotOption = slotOptionsMap.get(slotId);
+        let offset = typeof t.offsetHours === 'number' ? t.offsetHours : (slotOption?.offsetHours ?? 0);
+        if (offset < 0) offset = 0;
+        let duration = typeof t.durationHours === 'number' ? t.durationHours : (slotOption?.durationHours ?? SLOT_DURATION_HOURS);
+        if (duration < 1) duration = SLOT_DURATION_HOURS;
+
+        const start = addHours(nextHour, offset);
+        const end = addHours(start, duration);
+        const finalUrl = addDateParamsToUrl(base, start, end);
+
+        console.log(`> Template ${t.id} slotId=${slotId} offset=${offset}h duration=${duration}h -> start=${start.toISOString()} end=${end.toISOString()}`);
+        templateUrls.push({ slotId, docId: t.id, url: finalUrl, label: t.label, offset, duration });
+      }
+    }
+
+    if (legacySlotNumbers.length) {
+      for (const num of legacySlotNumbers) {
+        let offset = typeof t.offsetHours === 'number' ? t.offsetHours : (SLOT_OFFSETS[num] ?? 0);
+        if (offset < 0) offset = 0;
+        let duration = typeof t.durationHours === 'number' ? t.durationHours : SLOT_DURATION_HOURS;
+        if (duration < 1) duration = SLOT_DURATION_HOURS;
+
+        const start = addHours(nextHour, offset);
+        const end = addHours(start, duration);
+        const finalUrl = addDateParamsToUrl(base, start, end);
+
+        console.log(`> Template ${t.id} legacySlot=${num} offset=${offset}h duration=${duration}h -> start=${start.toISOString()} end=${end.toISOString()}`);
+        templateUrls.push({ slotLegacy: num, docId: t.id, url: finalUrl, label: t.label, offset, duration });
+      }
+    }
+  }
+
+  for (let i = 0; i < templateUrls.length; i++) {
+    const templateItem = templateUrls[i];
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
-      userAgent: pickRandom(USER_AGENTS),
+      userAgent: pickRandom(USER_AGENTS)
     });
-
     const page = await context.newPage();
-
     try {
-      const result = await scrapeSearchUrl(page, urls[i]);
+      console.log(`➡️ Scraping template ${templateItem.docId} (${templateItem.label || 'no-label'}) -> ${templateItem.url}`);
+      const result = await scrapeSearchUrl(page, templateItem.url);
 
       if (result.length === 0) {
-        console.log(`ℹ️  URL ${i + 1} devolvió 0 vehículos; omitiendo escritura`);
+        console.log(`ℹ️  Template ${templateItem.docId} devolvió 0 vehículos; omitiendo escritura`);
       } else {
-        const colName = `vehicles-url-${i + 1}`;
+        const colName = `vehicles-template-${templateItem.docId}`;
         await firestore.collection(colName).doc().set({
           scrapedAt: new Date(),
-          executionData: result
+          executionData: result,
+          templateId: templateItem.docId,
+          slotId: templateItem.slotId ?? null,
+          slotLegacy: templateItem.slotLegacy ?? null,
+          templateLabel: templateItem.label ?? null,
+          offsetUsedHours: templateItem.offset ?? null,
+          durationUsedHours: templateItem.duration ?? null
         });
         console.log(`✅ Volcados ${result.length} vehículos a Firestore (${colName})`);
-
-        // const outPath = path.resolve(__dirname, `../vehiclesJSON/vehicles-${i + 1}-${Date.now()}.json`);
-        // fs.writeFileSync(outPath, JSON.stringify(result, null, 2), 'utf-8');
-        // console.log(`✅ URL ${i + 1}: guardado ${result.length} vehículos en ${outPath}`);
       }
     } catch (err) {
-      console.error(`❌ Error scraping URL ${i + 1}:`, err);
+      console.error(`❌ Error scraping template ${templateItem.docId}:`, err);
     } finally {
       const delay = 2000 + Math.random() * 2000;
       console.log(`⏱ Esperando ${Math.round(delay)} ms…`);
