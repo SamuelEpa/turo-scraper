@@ -8,7 +8,6 @@ import { Firestore } from '@google-cloud/firestore';
 
 chromium.use(stealth());
 
-
 interface Vehicle {
   id: number;
   make: string;
@@ -52,10 +51,25 @@ function formatDate(d: Date) { return `${pad2(d.getMonth() + 1)}/${pad2(d.getDat
 function formatTime(d: Date) { return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
 function addHours(d: Date, h: number) { const x = new Date(d); x.setHours(x.getHours() + h); return x; }
 
+function addMinutes(d: Date, mins: number) {
+  const r = new Date(d);
+  r.setMinutes(r.getMinutes() + mins);
+  return r;
+}
+
+function roundDownToSlot(d: Date, slotMinutes = 30) {
+  const r = new Date(d);
+  const mins = r.getMinutes();
+  const floored = Math.floor(mins / slotMinutes) * slotMinutes;
+  r.setMinutes(floored, 0, 0);
+  return r;
+}
+
+const MIN_LEAD_MINUTES = 90;           
+const SLOT_GRANULARITY_MINUTES = 30;  
 
 const SLOT_OFFSETS: Record<number, number> = {};
 const SLOT_DURATION_HOURS = 72;
-
 
 function parseSlotsField(val: any): string[] | number[] | undefined {
   if (Array.isArray(val)) return val;
@@ -63,7 +77,7 @@ function parseSlotsField(val: any): string[] | number[] | undefined {
     const arr = val.split(',').map(s => s.trim()).filter(s => s !== '');
     const areNumbers = arr.every(a => /^[0-9]+$/.test(a));
     if (areNumbers) return arr.map(a => parseInt(a, 10));
-    return arr; 
+    return arr;
   }
   if (typeof val === 'number' && Number.isInteger(val)) return [val];
   return undefined;
@@ -96,6 +110,8 @@ function cleanUrlRemoveDateParams(rawUrl: string) {
     return rawUrl;
   }
 }
+
+
 function addDateParamsToUrl(baseUrl: string, start: Date, end: Date) {
   try {
     const u = new URL(baseUrl);
@@ -111,14 +127,16 @@ function addDateParamsToUrl(baseUrl: string, start: Date, end: Date) {
 }
 
 
-async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<any[]> {
+async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<{ results: any[]; startUsedISO?: string | null; endUsedISO?: string | null }> {
   const searchRequestPromise = page.waitForRequest(req => req.url().includes('/api/v2/search') && req.method() === 'POST');
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
   const searchReq = await searchRequestPromise;
   const searchPayload = JSON.parse(searchReq.postData()!);
   const { filters: nestedFilters } = searchPayload;
-  const { start: startDateTime, end: endDateTime } = nestedFilters.dates;
-  const age = nestedFilters.age;
+  const startDateTime = nestedFilters?.dates?.start ?? null;
+  const endDateTime = nestedFilters?.dates?.end ?? null;
+  const age = nestedFilters?.age;
 
   const filteredRes = await page.waitForResponse(res => res.url().includes('/api/v2/search') && res.status() === 200, { timeout: 60000 });
   const raw = await filteredRes.text();
@@ -160,7 +178,7 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
     Object.assign(allQuotes, quoteJson.estimatedQuotes);
   }
 
-  return vehicles.map(v => {
+  const results = vehicles.map(v => {
     const q = allQuotes[v.id];
     return {
       id: v.id,
@@ -170,6 +188,8 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
       position: vehicles.findIndex(x => x.id === v.id) + 1,
     };
   });
+
+  return { results, startUsedISO: startDateTime ?? null, endUsedISO: endDateTime ?? null };
 }
 
 (async () => {
@@ -201,8 +221,10 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
 
 
   const now = new Date();
-  const nextHour = new Date(now);
-  if (nextHour.getMinutes() > 0 || nextHour.getSeconds() > 0) nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
+  const baseCandidate = addMinutes(now, MIN_LEAD_MINUTES);
+  const baseAvailableSlot = roundDownToSlot(baseCandidate, SLOT_GRANULARITY_MINUTES);
+  console.log(`now=${now.toISOString()}, baseCandidate=${baseCandidate.toISOString()}, baseAvailableSlot=${baseAvailableSlot.toISOString()}`);
+
 
   const templates = await (async () => {
     const snap = await firestore.collection('scrape-templates').where('active', '==', true).get();
@@ -213,8 +235,8 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
         id: d.id,
         label: data.label,
         url: data.url,
-        slotId: data.slotId ?? null,                
-        slotsIds: parseSlotsField(data.slots) ?? undefined, 
+        slotId: data.slotId ?? null,
+        slotsIds: parseSlotsField(data.slots) ?? undefined,
         slot: data.slot ?? undefined,
         offsetHours: typeof data.offsetHours === 'number' ? data.offsetHours : undefined,
         durationHours: typeof data.durationHours === 'number' ? data.durationHours : undefined
@@ -231,11 +253,18 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
 
   const slotOptionsMap = await getActiveSlotsById();
 
-  const templateUrls: { slotId?: string | null; slotLegacy?: number | null; docId: string; url: string; label?: string; offset?: number; duration?: number }[] = [];
-
+  const templateUrls: {
+    slotId?: string | null;
+    slotLegacy?: number | null;
+    docId: string;
+    url: string;
+    label?: string;
+    offset?: number | null;
+    duration?: number | null;
+    raw?: boolean;
+  }[] = [];
 
   for (const t of templates) {
-    const base = cleanUrlRemoveDateParams(t.url);
     let slotsToCreateIds: string[] = [];
     let legacySlotNumbers: number[] = [];
 
@@ -250,10 +279,22 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
       slotsToCreateIds = [t.slotId];
     }
 
-    if (!slotsToCreateIds.length && !legacySlotNumbers.length) {
-      if (typeof t.slot === 'number') legacySlotNumbers = [t.slot];
-      else legacySlotNumbers = [1]; 
+    const hasAnySlot = slotsToCreateIds.length > 0 || legacySlotNumbers.length > 0 || (typeof t.slot === 'number');
+
+    if (!hasAnySlot) {
+      console.log(`> Template ${t.id} sin slot: usar URL raw tal cual.`);
+      templateUrls.push({
+        docId: t.id,
+        url: t.url,
+        label: t.label,
+        offset: null,
+        duration: null,
+        raw: true
+      });
+      continue;
     }
+
+    const base = cleanUrlRemoveDateParams(t.url);
 
     if (slotsToCreateIds.length) {
       for (const slotId of slotsToCreateIds) {
@@ -263,8 +304,8 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
         let duration = typeof t.durationHours === 'number' ? t.durationHours : (slotOption?.durationHours ?? SLOT_DURATION_HOURS);
         if (duration < 1) duration = SLOT_DURATION_HOURS;
 
-        const start = addHours(nextHour, offset);
-        const end = addHours(start, duration);
+        const start = addMinutes(baseAvailableSlot, Math.round(offset * 60));
+        const end = addMinutes(start, Math.round(duration * 60));
         const finalUrl = addDateParamsToUrl(base, start, end);
 
         console.log(`> Template ${t.id} slotId=${slotId} offset=${offset}h duration=${duration}h -> start=${start.toISOString()} end=${end.toISOString()}`);
@@ -279,8 +320,8 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
         let duration = typeof t.durationHours === 'number' ? t.durationHours : SLOT_DURATION_HOURS;
         if (duration < 1) duration = SLOT_DURATION_HOURS;
 
-        const start = addHours(nextHour, offset);
-        const end = addHours(start, duration);
+        const start = addMinutes(baseAvailableSlot, Math.round(offset * 60));
+        const end = addMinutes(start, Math.round(duration * 60));
         const finalUrl = addDateParamsToUrl(base, start, end);
 
         console.log(`> Template ${t.id} legacySlot=${num} offset=${offset}h duration=${duration}h -> start=${start.toISOString()} end=${end.toISOString()}`);
@@ -298,23 +339,30 @@ async function scrapeSearchUrl(page: Page, url: string, attempt = 1): Promise<an
     const page = await context.newPage();
     try {
       console.log(`➡️ Scraping template ${templateItem.docId} (${templateItem.label || 'no-label'}) -> ${templateItem.url}`);
-      const result = await scrapeSearchUrl(page, templateItem.url);
+      const { results, startUsedISO, endUsedISO } = await scrapeSearchUrl(page, templateItem.url);
 
-      if (result.length === 0) {
+      if (results.length === 0) {
         console.log(`ℹ️  Template ${templateItem.docId} devolvió 0 vehículos; omitiendo escritura`);
       } else {
         const colName = `vehicles-template-${templateItem.docId}`;
         await firestore.collection(colName).doc().set({
           scrapedAt: new Date(),
-          executionData: result,
+          executionData: results,
           templateId: templateItem.docId,
           slotId: templateItem.slotId ?? null,
           slotLegacy: templateItem.slotLegacy ?? null,
           templateLabel: templateItem.label ?? null,
           offsetUsedHours: templateItem.offset ?? null,
-          durationUsedHours: templateItem.duration ?? null
+          durationUsedHours: templateItem.duration ?? null,
+          startUsedISO: startUsedISO ?? null,
+          endUsedISO: endUsedISO ?? null
         });
-        console.log(`✅ Volcados ${result.length} vehículos a Firestore (${colName})`);
+        console.log(`✅ Volcados ${results.length} vehículos a Firestore (${colName})`);
+
+
+        // const outPath = path.resolve(__dirname, `../vehiclesJSON/vehicles-${Date.now()}.json`);
+        // fs.writeFileSync(outPath, JSON.stringify(results, null, 2), 'utf-8');
+        // console.log(`✅ Guardado ${results.length} vehículos en ${outPath}`);
       }
     } catch (err) {
       console.error(`❌ Error scraping template ${templateItem.docId}:`, err);
